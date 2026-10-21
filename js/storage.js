@@ -136,6 +136,20 @@ window.RelataStore = (() => {
         if (name === id) return id;
         try { await h.move(name); return name; } catch (e) { return id; }
       },
+      // Image files live in data/images/; nodes reference them as "images/<name>".
+      async writeImage(name, blob) {
+        const idir = await dir.getDirectoryHandle('images', { create: true });
+        const h = await idir.getFileHandle(name, { create: true });
+        const w = await h.createWritable();
+        await w.write(blob);
+        await w.close();
+        return 'images/' + name;
+      },
+      async readImage(path) {
+        const name = String(path).replace(/^images\//, '');
+        const idir = await dir.getDirectoryHandle('images');
+        return (await idir.getFileHandle(name)).getFile();
+      },
       // One snapshot per project per day in data/backups/, keeping the 10 most recent.
       async backup(id, data) {
         const day = new Date().toISOString().slice(0, 10);

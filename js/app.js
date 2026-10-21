@@ -45,7 +45,7 @@
   const nodeEls = new Map();  // nodeId -> {root, label, title, body, text, h}
   const edgeEls = new Map();  // edgeId -> {g, hit, line, label}
   const view = { x: 0, y: 0, s: 1 };
-  const filter = { type: null, query: '' };
+  const filter = { type: null, query: '', chapter: null }; // chapter: {id, mode: 'only' | 'upto'}
   let selected = null;        // {kind: 'node'|'edge', id}
   let gesture = null;
   let blockNative = false;
@@ -81,6 +81,7 @@
       const set = adj.get(id);
       if (set) for (const eid of set) drawEdge(eid);
     }
+    if (storyPrefs.path && dirtyEdgesOf.size) drawStoryPath();
     dirtyPos.clear();
     dirtyEdgesOf.clear();
   }
@@ -146,9 +147,16 @@
     return { x: n.x + NODE_W / 2, y: n.y + nodeHeight(id) / 2 };
   }
 
+  // Left edge of the free canvas area (the story panel covers the left side when open).
+  function freeLeft() {
+    const story = document.getElementById('story');
+    return story && !story.hidden ? story.getBoundingClientRect().right : 0;
+  }
+
   function centerOn(id, s = view.s, animate = true) {
     const c = center(id);
-    const tx = innerWidth / 2 - c.x * s, ty = innerHeight / 2 - c.y * s;
+    const cx = (freeLeft() + innerWidth) / 2;
+    const tx = cx - c.x * s, ty = innerHeight / 2 - c.y * s;
     animate ? animateView(tx, ty, s) : setView(tx, ty, s);
   }
 
@@ -166,9 +174,9 @@
       x1 = Math.max(x1, n.x + NODE_W); y1 = Math.max(y1, n.y + nodeHeight(n.id));
     }
     if (x0 === Infinity) return;
-    const pad = 90;
-    const s = clamp(Math.min(innerWidth / (x1 - x0 + pad * 2), innerHeight / (y1 - y0 + pad * 2)), MIN_SCALE, 1);
-    animateView(innerWidth / 2 - (x0 + x1) / 2 * s, innerHeight / 2 - (y0 + y1) / 2 * s, s);
+    const pad = 90, left = freeLeft(), w = innerWidth - left;
+    const s = clamp(Math.min(w / (x1 - x0 + pad * 2), innerHeight / (y1 - y0 + pad * 2)), MIN_SCALE, 1);
+    animateView(left + w / 2 - (x0 + x1) / 2 * s, innerHeight / 2 - (y0 + y1) / 2 * s, s);
   }
 
   // ---------- nodes ----------
@@ -180,13 +188,44 @@
       title: typeof d.title === 'string' ? d.title.replace(/[\r\n\t]+/g, ' ').slice(0, 1000) : '',
       kind: d.kind === 'image' ? 'image' : 'text',
       body: typeof d.body === 'string' ? Sanitize.rich(d.body) : '',
-      image: typeof d.image === 'string' && /^data:image\//.test(d.image) ? d.image : '',
+      image: typeof d.image === 'string' && (/^data:image\//.test(d.image) || IMAGE_PATH.test(d.image)) ? d.image : '',
+      parent: typeof d.parent === 'string' ? d.parent : '',
       x: Number.isFinite(+d.x) ? +d.x : 0,
       y: Number.isFinite(+d.y) ? +d.y : 0,
     };
     if (n.kind === 'image' && !n.image) n.kind = 'text';
-    if (n.kind === 'text') n.image = '';
+    if (n.kind === 'text') { n.image = ''; n.parent = ''; }
     return n;
+  }
+
+  const IMAGE_PATH = /^images\/[^/\\]+$/;
+
+  // Attached image nodes show their parent's title and type and follow it around.
+  function childrenOf(id) {
+    const out = [];
+    for (const n of nodes.values()) if (n.parent === id) out.push(n);
+    return out;
+  }
+
+  function paintTitle(n) {
+    const el = nodeEls.get(n.id);
+    if (el.title.textContent !== n.title) el.title.textContent = n.title;
+    const attached = !!n.parent;
+    el.root.classList.toggle('attached', attached);
+    el.title.contentEditable = attached ? 'false' : 'true';
+    el.title.title = attached ? `Image of “${n.title || 'Untitled'}”` : '';
+  }
+
+  function syncChildren(id) {
+    const p = nodes.get(id);
+    if (!p) return;
+    for (const c of childrenOf(id)) {
+      const typeChanged = c.type !== p.type;
+      c.title = p.title;
+      c.type = p.type;
+      paintTitle(c);
+      if (typeChanged) paintType(c);
+    }
   }
 
   const ro = new ResizeObserver(entries => {
@@ -212,9 +251,9 @@
       text: null,
       h: 0,
     };
-    el.title.textContent = n.title;
     root.style.transform = `translate(${n.x}px,${n.y}px)`;
     nodeEls.set(n.id, el);
+    paintTitle(n);
     paintType(n);
     paintBody(n);
     parent.appendChild(root);
@@ -228,19 +267,41 @@
     el.label.textContent = n.type;
   }
 
+  // Image references are data: URLs (browser storage) or "images/<file>" inside the data folder.
+  const imageURLs = new Map(); // path -> Promise<objectURL>
+
+  function imageSrc(ref) {
+    if (ref.startsWith('data:')) return Promise.resolve(ref);
+    if (!imageURLs.has(ref)) {
+      if (!backend.readImage) return Promise.reject(new Error('No image folder'));
+      const p = backend.readImage(ref).then(blob => URL.createObjectURL(blob));
+      p.catch(() => imageURLs.delete(ref));
+      imageURLs.set(ref, p);
+    }
+    return imageURLs.get(ref);
+  }
+
+  function forgetImageURLs() {
+    for (const p of imageURLs.values()) p.then(u => URL.revokeObjectURL(u), () => {});
+    imageURLs.clear();
+  }
+
   function paintBody(n) {
     const el = nodeEls.get(n.id);
     el.body.textContent = '';
     el.text = null;
     dropMentions(n.id);
     el.root.classList.toggle('is-image', n.kind === 'image');
+    el.root.classList.remove('img-missing');
     if (n.kind === 'image') {
       const img = document.createElement('img');
       img.alt = '';
       img.draggable = false;
       img.decoding = 'async';
-      img.src = n.image;
       el.body.appendChild(img);
+      const ref = n.image;
+      imageSrc(ref).then(url => { if (n.image === ref) img.src = url; })
+        .catch(() => { if (n.image === ref) el.root.classList.add('img-missing'); });
     } else {
       const t = document.createElement('div');
       t.className = 'text';
@@ -283,6 +344,8 @@
     nodes.delete(id);
     nodeEls.delete(id);
     adj.delete(id);
+    for (const c of childrenOf(id)) { c.parent = ''; paintTitle(c); }
+    removeFromStory(id);
     if (!bulkLoading) scheduleMentionRescan();
   }
 
@@ -474,6 +537,7 @@
     return {
       nodes: [...nodes.values()].map(n => ({ ...n })),
       edges: [...edges.values()].map(e => ({ ...e })),
+      chapters: chapters.map(c => ({ ...c, items: [...c.items] })),
     };
   }
 
@@ -486,6 +550,7 @@
   function restore(snap) {
     loadData(snap);
     scheduleSave();
+    externalizeImages();
   }
 
   function undo() {
@@ -526,8 +591,15 @@
       if (!d || typeof d !== 'object') continue;
       insertEdge(makeEdge(d.a, d.b, d.label, d.id, d));
     }
+    for (const n of nodes.values()) {
+      const p = n.parent && nodes.get(n.parent);
+      if (n.parent && (!p || p.parent || n.kind !== 'image')) { n.parent = ''; paintTitle(n); }
+    }
+    for (const n of nodes.values()) if (!n.parent) syncChildren(n.id);
+    chapters = makeChapters(data && data.chapters);
     bulkLoading = false;
     rescanAllMentions();
+    scheduleStory();
     applyFilter();
     refreshCounts();
   }
@@ -541,11 +613,13 @@
       nodes: [...nodes.values()].map(n => ({
         id: n.id, type: n.type, title: n.title, kind: n.kind,
         body: n.body, image: n.kind === 'image' ? n.image : '',
+        ...(n.parent ? { parent: n.parent } : {}),
         x: Math.round(n.x), y: Math.round(n.y),
       })),
       edges: [...edges.values()].map(e => ({
         id: e.id, a: e.a, b: e.b, label: e.label, color: e.color, width: e.width, dash: e.dash,
       })),
+      chapters: chapters.map(c => ({ id: c.id, title: c.title, items: [...c.items] })),
     };
   }
 
@@ -629,10 +703,12 @@
     document.title = `${project.title} · relata`;
     history.length = 0;
     future.length = 0;
-    filter.type = null; filter.query = ''; searchEl.value = '';
+    filter.type = null; filter.chapter = null; filter.query = ''; searchEl.value = '';
+    stopPlay();
     loadData(data);
     if (!nodes.size) { seedFirst(); scheduleSave(); }
     if (center) centerFirst(false);
+    externalizeImages();
     Store.kvSet('last', { kind: backend.kind, id }).catch(() => {});
     renderStatus();
     return true;
@@ -691,6 +767,7 @@
 
   async function useBackend(next) {
     await flushSave();
+    forgetImageURLs();
     backend = next;
     renderStatus();
   }
@@ -787,6 +864,7 @@
   function rebuildTitleIndex() {
     titleTargets.clear();
     for (const n of nodes.values()) {
+      if (n.parent) continue;
       const k = normTitle(n.title);
       if (k.length >= MIN_TITLE && !titleTargets.has(k)) titleTargets.set(k, n.id);
     }
@@ -892,10 +970,21 @@
 
   function applyFilter() {
     const q = filter.query.trim().toLowerCase();
-    const active = !!(filter.type || q);
+    let allowed = null, ci = -1;
+    if (filter.chapter) {
+      ci = chapters.findIndex(c => c.id === filter.chapter.id);
+      if (ci < 0) filter.chapter = null;
+      else {
+        allowed = new Set();
+        const shown = filter.chapter.mode === 'only' ? [chapters[ci]] : chapters.slice(0, ci + 1);
+        for (const c of shown) for (const id of c.items) allowed.add(id);
+      }
+    }
+    const active = !!(filter.type || q || allowed);
     for (const n of nodes.values()) {
       const vis = (!filter.type || n.type === filter.type) &&
-        (!q || n.title.toLowerCase().includes(q) || plainOf(n).includes(q));
+        (!q || n.title.toLowerCase().includes(q) || plainOf(n).includes(q)) &&
+        (!allowed || allowed.has(n.id) || (!!n.parent && allowed.has(n.parent)));
       n._vis = vis;
       const el = nodeEls.get(n.id);
       el.root.classList.toggle('is-hidden', !vis);
@@ -912,11 +1001,16 @@
     if (active) {
       const count = [...nodes.values()].filter(n => n._vis).length;
       const parts = [];
+      if (allowed) {
+        const name = escapeHtml(chapterName(chapters[ci], ci));
+        parts.push(filter.chapter.mode === 'only' ? `chapter <b>${ci + 1}</b> ${name}` : `what's known up to chapter <b>${ci + 1}</b>`);
+      }
       if (filter.type) parts.push(`<b>${escapeHtml(filter.type)}</b>`);
       if (q) parts.push(`“${escapeHtml(filter.query.trim())}”`);
       filterHint.innerHTML = `Showing ${parts.join(' · ')} — ${count} node${count === 1 ? '' : 's'} · click empty space to show all`;
     }
     filterHint.hidden = !active;
+    if (!storyEl.hidden || storyPrefs.path) scheduleStory();
   }
 
   function escapeHtml(s) {
@@ -930,6 +1024,7 @@
 
   function clearFilter() {
     filter.type = null;
+    filter.chapter = null;
     filter.query = '';
     searchEl.value = '';
     applyFilter();
@@ -1144,6 +1239,11 @@
       n.x = g.ox + dx / view.s;
       n.y = g.oy + dy / view.s;
       markMoved(g.id);
+      for (const k of g.kids) {
+        const c = nodes.get(k.id);
+        if (c) { c.x = k.ox + dx / view.s; c.y = k.oy + dy / view.s; markMoved(k.id); }
+      }
+      showItemDrop(storyEl.hidden ? null : itemDropAt(e.clientX, e.clientY));
     } else if (g.kind === 'connect') {
       if (!nodes.has(g.id)) return;
       const c = center(g.id), p = toWorld(e.clientX, e.clientY);
@@ -1166,6 +1266,7 @@
     } else if (g.kind === 'press') {
       g.kind = 'drag';
       g.snap = snapshot();
+      g.kids = childrenOf(g.id).map(c => ({ id: c.id, ox: c.x, oy: c.y }));
       blurEditing();
       select({ kind: 'node', id: g.id });
       nodeEls.get(g.id)?.root.classList.add('dragging');
@@ -1187,6 +1288,17 @@
       if (!g.moved && g.bg && !cancelled) onBackgroundClick();
     } else if (g.kind === 'drag') {
       nodeEls.get(g.id)?.root.classList.remove('dragging');
+      const drop = !cancelled && !storyEl.hidden && itemDropAt(e.clientX, e.clientY);
+      clearDropMarks();
+      if (drop) {
+        // Dropped onto a chapter: the node goes back where it was and joins the story.
+        for (const k of [{ id: g.id, ox: g.ox, oy: g.oy }, ...g.kids]) {
+          const c = nodes.get(k.id);
+          if (c) { c.x = k.ox; c.y = k.oy; markMoved(k.id); }
+        }
+        placeInChapter(g.id, drop.ch, drop.index);
+        return;
+      }
       pushHistory(g.snap);
       scheduleSave();
     } else if (g.kind === 'press') {
@@ -1201,7 +1313,7 @@
   }
 
   function onBackgroundClick() {
-    if (filter.type || filter.query) clearFilter();
+    if (filter.type || filter.query || filter.chapter) clearFilter();
     select(null);
   }
 
@@ -1338,7 +1450,9 @@
     if (ed.classList.contains('title')) {
       if (ed.innerHTML === '<br>') ed.innerHTML = '';
       n.title = ed.textContent.replace(/[\r\n\t]+/g, ' ');
+      syncChildren(n.id);
       scheduleMentionRescan();
+      scheduleStory();
     } else if (ed.classList.contains('text')) {
       if (ed.innerHTML === '<br>') ed.innerHTML = '';
       n.body = Sanitize.rich(ed.innerHTML);
@@ -1372,8 +1486,8 @@
     const cd = e.clipboardData;
     const file = [...cd.files].find(f => f.type.startsWith('image/'));
     const root = ed.closest('.node');
-    if (file && root && ed.classList.contains('text') && !ed.textContent.trim()) {
-      setNodeImage(root.dataset.id, file);
+    if (file && root) {
+      addImageTo(root.dataset.id, file);
       return;
     }
     let text = cd.getData('text/plain');
@@ -1427,47 +1541,136 @@
   });
 
   // ---------- images ----------
+  // "Add image" never replaces a node's text: it creates an image node attached to it.
+  // In folder mode the image is saved as a file in data/images/ and referenced by path.
 
-  function readImage(file) {
+  const COPY_TYPES = /^image\/(jpeg|png|webp|gif)$/;
+  const EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+
+  // Keeps the original file when it's reasonably sized, otherwise makes a downscaled copy.
+  function processImage(file, maxSide, maxBytes) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
         URL.revokeObjectURL(url);
-        let w = img.naturalWidth, h = img.naturalHeight;
+        const w = img.naturalWidth, h = img.naturalHeight;
         if (!w || !h) return reject(new Error('Empty image'));
-        const k = Math.min(1, (NODE_W * 4) / w, 2400 / h);
-        w = Math.round(w * k); h = Math.round(h * k);
+        if (COPY_TYPES.test(file.type) && Math.max(w, h) <= maxSide && file.size <= maxBytes) {
+          return resolve({ blob: file, ext: EXT[file.type] });
+        }
+        const k = Math.min(1, maxSide / Math.max(w, h));
         const c = document.createElement('canvas');
-        c.width = w; c.height = h;
-        c.getContext('2d').drawImage(img, 0, 0, w, h);
-        let data = c.toDataURL('image/webp', 0.86);
-        if (!data.startsWith('data:image/webp')) data = c.toDataURL('image/jpeg', 0.88);
-        resolve(data);
+        c.width = Math.round(w * k);
+        c.height = Math.round(h * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        c.toBlob(b => b ? resolve({ blob: b, ext: EXT[b.type] || 'png' }) : reject(new Error('Encode failed')), 'image/webp', 0.88);
       };
       img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Unreadable image')); };
       img.src = url;
     });
   }
 
-  function setNodeImage(id, file) {
-    readImage(file).then(data => {
-      const n = nodes.get(id);
-      if (!n) return;
-      pushHistory();
-      n.kind = 'image';
-      n.image = data;
-      paintBody(n);
-      scheduleSave();
-    }).catch(() => toast('Could not read that image'));
+  const blobToDataURL = blob => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+
+  function dataURLToBlob(url) {
+    const [head, b64] = url.split(',');
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: head.slice(5).split(';')[0] });
   }
 
-  function createImageNode(file, x, y) {
-    readImage(file).then(data => {
-      pushHistory();
-      const n = createNode({ type: filter.type || CFG.defaultType, kind: 'image', image: data, x: x - NODE_W / 2, y: y - 20 });
-      select({ kind: 'node', id: n.id });
-    }).catch(() => toast('Could not read that image'));
+  const imageName = (hint, ext) => `${Store.slug(hint) || 'image'}-${uid().slice(-6)}.${ext}`;
+
+  // Returns what the node stores: "images/<file>" in folder mode, otherwise a data URL.
+  async function storeImage(file, hint) {
+    if (backend.writeImage) {
+      const { blob, ext } = await processImage(file, 2000, 3 * 1024 * 1024);
+      const ref = await backend.writeImage(imageName(hint, ext), blob);
+      imageURLs.set(ref, Promise.resolve(URL.createObjectURL(blob)));
+      return ref;
+    }
+    const { blob } = await processImage(file, 1040, 400 * 1024);
+    return blobToDataURL(blob);
+  }
+
+  // Moves embedded images (browser projects, imports, older files) into data/images/.
+  async function externalizeImages() {
+    if (!backend.writeImage) return;
+    const target = backend;
+    let changed = false;
+    for (const n of [...nodes.values()]) {
+      if (n.kind !== 'image' || !n.image.startsWith('data:')) continue;
+      try {
+        const blob = dataURLToBlob(n.image);
+        const ref = await target.writeImage(imageName(n.title, EXT[blob.type] || 'png'), blob);
+        imageURLs.set(ref, Promise.resolve(URL.createObjectURL(blob)));
+        if (backend === target && nodes.get(n.id) === n) { n.image = ref; changed = true; }
+      } catch (err) { console.warn('Could not move image into the folder', err); }
+    }
+    if (changed) scheduleSave();
+  }
+
+  // Data URLs for every image, so an export is one self-contained file.
+  async function embeddedImages(data) {
+    for (const d of data.nodes) {
+      if (d.kind !== 'image' || !IMAGE_PATH.test(d.image)) continue;
+      try { d.image = await blobToDataURL(await backend.readImage(d.image)); } catch (err) { /* leave the path */ }
+    }
+    return data;
+  }
+
+  async function addImageTo(id, file) {
+    const p = nodes.get(id);
+    if (!p) return;
+    let ref;
+    try { ref = await storeImage(file, p.title); } catch (err) { return toast('Could not read that image'); }
+    if (!nodes.has(id)) return;
+    pushHistory();
+    let y = p.y;
+    for (const c of childrenOf(id)) y = Math.max(y, c.y + nodeHeight(c.id) + 28);
+    const n = createNode({ kind: 'image', image: ref, parent: id, type: p.type, title: p.title, x: p.x + NODE_W + 60, y });
+    insertEdge(makeEdge(id, n.id));
+    applyFilter();
+    refreshCounts();
+    scheduleSave();
+    select({ kind: 'node', id: n.id });
+  }
+
+  async function setNodeImage(id, file) {
+    const n0 = nodes.get(id);
+    if (!n0) return;
+    let ref;
+    try { ref = await storeImage(file, n0.title); } catch (err) { return toast('Could not read that image'); }
+    const n = nodes.get(id);
+    if (!n) return;
+    pushHistory();
+    n.kind = 'image';
+    n.image = ref;
+    paintBody(n);
+    scheduleSave();
+  }
+
+  async function createImageNode(file, x, y) {
+    let ref;
+    try { ref = await storeImage(file, file.name.replace(/\.[^.]+$/, '')); } catch (err) { return toast('Could not read that image'); }
+    pushHistory();
+    const n = createNode({ type: filter.type || CFG.defaultType, kind: 'image', image: ref, x: x - NODE_W / 2, y: y - 20 });
+    select({ kind: 'node', id: n.id });
+  }
+
+  // Images dropped on a text node attach to it; on an image node they replace the picture.
+  async function imagesOnto(id, files) {
+    const n = nodes.get(id);
+    if (!n) return;
+    if (n.kind === 'image') return setNodeImage(id, files[0]);
+    for (const f of files) await addImageTo(id, f);
   }
 
   function setNodeText(id) {
@@ -1476,19 +1679,36 @@
     pushHistory();
     n.kind = 'text';
     n.image = '';
+    n.parent = '';
+    paintTitle(n);
     paintBody(n);
     scheduleSave();
   }
 
-  function pickImage(id) {
+  function detachImage(id) {
+    const n = nodes.get(id);
+    if (!n || !n.parent) return;
+    pushHistory();
+    n.parent = '';
+    paintTitle(n);
+    scheduleSave();
+    scheduleMentionRescan();
+  }
+
+  function pickImage(id, mode) {
     imageInput.dataset.target = id;
+    imageInput.dataset.mode = mode;
+    imageInput.multiple = mode === 'attach';
     imageInput.value = '';
     imageInput.click();
   }
 
   imageInput.addEventListener('change', () => {
-    const file = imageInput.files[0];
-    if (file && nodes.has(imageInput.dataset.target)) setNodeImage(imageInput.dataset.target, file);
+    const files = [...imageInput.files];
+    const id = imageInput.dataset.target;
+    if (!files.length || !nodes.has(id)) return;
+    if (imageInput.dataset.mode === 'attach') imagesOnto(id, files);
+    else setNodeImage(id, files[0]);
   });
 
   window.addEventListener('dragover', e => e.preventDefault());
@@ -1500,7 +1720,7 @@
     const images = files.filter(f => f.type.startsWith('image/'));
     const nodeEl = e.target.closest && e.target.closest('.node');
     if (images.length) {
-      if (nodeEl) setNodeImage(nodeEl.dataset.id, images[0]);
+      if (nodeEl) imagesOnto(nodeEl.dataset.id, images);
       else {
         const p = toWorld(e.clientX, e.clientY);
         images.forEach((f, i) => createImageNode(f, p.x + i * (NODE_W + 30), p.y));
@@ -1590,6 +1810,8 @@
     pushHistory();
     n.type = key;
     paintType(n);
+    syncChildren(id);
+    scheduleStory();
     applyFilter();
     refreshCounts();
     scheduleSave();
@@ -1598,6 +1820,7 @@
   function deleteNode(id) {
     if (!nodes.has(id)) return;
     pushHistory();
+    for (const c of childrenOf(id)) removeNode(c.id);
     removeNode(id);
     applyFilter();
     refreshCounts();
@@ -1647,11 +1870,17 @@
       const n = nodes.get(id);
       blurEditing();
       select({ kind: 'node', id });
-      const items = [{ heading: 'Type' }, ...typeItems(id), '-'];
-      if (n.kind === 'text') items.push({ label: 'Add image…', action: () => pickImage(id) });
-      else items.push({ label: 'Replace image…', action: () => pickImage(id) }, { label: 'Back to text', action: () => setNodeText(id) });
-      items.push({ label: 'Center view here', action: () => centerOn(id) }, '-',
-        { label: 'Delete node', danger: true, action: () => deleteNode(id) });
+      const items = n.parent ? [] : [{ heading: 'Type' }, ...typeItems(id), '-'];
+      if (n.kind === 'text') items.push({ label: 'Add image…', action: () => pickImage(id, 'attach') });
+      else {
+        items.push({ label: 'Replace image…', action: () => pickImage(id, 'replace') });
+        if (n.parent) items.push({ label: 'Go to ' + (nodes.get(n.parent).title || 'parent'), action: () => jumpTo(n.parent) },
+          { label: 'Detach (own title)', action: () => detachImage(id) });
+        else items.push({ label: 'Back to text', action: () => setNodeText(id) });
+      }
+      items.push(...chapterItems(id));
+      items.push('-', { label: 'Center view here', action: () => centerOn(id) },
+        { label: n.parent ? 'Delete image' : 'Delete node', danger: true, action: () => deleteNode(id) });
       showMenu(items, e.clientX, e.clientY);
       return;
     }
@@ -1691,7 +1920,8 @@
       if (!menuEl.hidden) return hideMenu();
       if (!helpEl.hidden) return (helpEl.hidden = true);
       if (editing) return a.blur();
-      if (filter.type || filter.query) return clearFilter();
+      if (play) return stopPlay();
+      if (filter.type || filter.query || filter.chapter) return clearFilter();
       return select(null);
     }
     if (mod && key === 'f') { e.preventDefault(); searchEl.focus(); searchEl.select(); return; }
@@ -1702,7 +1932,14 @@
     if (mod && key === 'y') { e.preventDefault(); redo(); return; }
     if (mod) return;
 
-    if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (play && ['ArrowRight', 'ArrowDown', 'PageDown', 'ArrowLeft', 'ArrowUp', 'PageUp'].includes(e.key)) {
+      e.preventDefault();
+      stepPlay(['ArrowRight', 'ArrowDown', 'PageDown'].includes(e.key) ? 1 : -1);
+    } else if (key === 'c') {
+      toggleStory();
+    } else if (key === 'p') {
+      play ? stopPlay() : startPlay();
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
       if (!selected) return;
       e.preventDefault();
       selected.kind === 'node' ? deleteNode(selected.id) : deleteEdge(selected.id);
@@ -1733,6 +1970,455 @@
   });
   window.addEventListener('blur', () => { spaceDown = false; viewport.classList.remove('space'); });
 
+  // ---------- story: chapters, reading order, play ----------
+  // The map layout is never touched. Chapters hold an ordered list of node ids ("beats");
+  // the story shows up as markers on nodes, an ordering panel, an optional path and play mode.
+
+  let chapters = []; // [{id, title, items: [nodeId]}]
+  const storyEl = $('#story');
+  const storyList = $('#story-list');
+  const storyPathEl = $('#story-path');
+  const playEl = $('#play');
+  const storyBtn = $('#btn-story');
+  const storyPrefs = (() => {
+    try { return JSON.parse(localStorage.getItem('relata.story')) || {}; } catch (err) { return {}; }
+  })();
+  const saveStoryPrefs = () => {
+    try { localStorage.setItem('relata.story', JSON.stringify(storyPrefs)); } catch (err) { /* ignore */ }
+  };
+  let storyReq = 0;
+  let play = null; // {seq, i}
+
+  function makeChapters(list) {
+    const out = [], seen = new Set();
+    for (const c of Array.isArray(list) ? list : []) {
+      if (!c || typeof c !== 'object') continue;
+      const id = typeof c.id === 'string' && c.id && !seen.has(c.id) ? c.id : uid();
+      seen.add(id);
+      const items = [];
+      for (const x of Array.isArray(c.items) ? c.items : []) if (nodes.has(x) && !items.includes(x)) items.push(x);
+      out.push({ id, title: typeof c.title === 'string' ? c.title.slice(0, 200) : '', items });
+    }
+    return out;
+  }
+
+  function sequence() {
+    const seq = [];
+    chapters.forEach((ch, ci) => ch.items.forEach((id, pi) => seq.push({ id, ch, ci, pi })));
+    return seq;
+  }
+
+  const chapterName = (ch, ci) => ch.title.trim() || `Chapter ${ci + 1}`;
+
+  function removeFromStory(id) {
+    let hit = false;
+    for (const c of chapters) {
+      const i = c.items.indexOf(id);
+      if (i >= 0) { c.items.splice(i, 1); hit = true; }
+    }
+    if (hit) scheduleStory();
+  }
+
+  function storyChanged() {
+    scheduleSave();
+    if (filter.chapter) applyFilter();
+    if (play) { play.seq = sequence(); play.i = Math.min(play.i, play.seq.length - 1); if (play.i < 0) stopPlay(); }
+    scheduleStory();
+  }
+
+  function scheduleStory() {
+    if (!storyReq) storyReq = requestAnimationFrame(() => { storyReq = 0; renderStory(); });
+  }
+
+  function renderStory() {
+    renderStoryMarks();
+    const editingTitle = storyEl.contains(document.activeElement) && document.activeElement.classList.contains('ch-title');
+    if (!storyEl.hidden && !editingTitle) renderStoryPanel();
+    drawStoryPath();
+    storyBtn.classList.toggle('on', !storyEl.hidden);
+  }
+
+  // Small "chapter·position" marker on each node that is part of the story.
+  function renderStoryMarks() {
+    const marks = new Map();
+    chapters.forEach((c, ci) => c.items.forEach((id, pi) => {
+      if (!marks.has(id)) marks.set(id, []);
+      marks.get(id).push([ci, pi, c]);
+    }));
+    for (const [id, el] of nodeEls) {
+      const m = marks.get(id);
+      if (!m) { if (el.mark) el.mark.hidden = true; continue; }
+      if (!el.mark) {
+        el.mark = document.createElement('span');
+        el.mark.className = 'story-mark';
+        el.label.after(el.mark);
+      }
+      el.mark.hidden = false;
+      el.mark.textContent = `${m[0][0] + 1}·${m[0][1] + 1}` + (m.length > 1 ? ` +${m.length - 1}` : '');
+      el.mark.title = m.map(([ci, pi, c]) => `${chapterName(c, ci)} · beat ${pi + 1}`).join('\n');
+    }
+  }
+
+  function renderStoryPanel() {
+    const active = filter.chapter;
+    const cur = play && play.seq[play.i];
+    storyList.textContent = '';
+    if (!chapters.length) {
+      const p = document.createElement('p');
+      p.className = 'story-empty';
+      p.textContent = 'No chapters yet. Add one with +, then drag nodes from the canvas onto it.';
+      storyList.appendChild(p);
+      return;
+    }
+    chapters.forEach((c, ci) => {
+      const sec = document.createElement('section');
+      sec.className = 'chapter';
+      sec.dataset.id = c.id;
+      if (active && active.id === c.id) sec.classList.add(active.mode === 'only' ? 'active' : 'upto');
+      sec.innerHTML = `<div class="ch-head" draggable="true">
+          <button class="ch-num" title="Show only this chapter"></button>
+          <input class="ch-title" spellcheck="false">
+          <button class="ch-btn ch-upto" title="Reader's view: show only what appears up to here"><svg viewBox="0 0 20 20"><path d="M2.5 10s2.8-5 7.5-5 7.5 5 7.5 5-2.8 5-7.5 5-7.5-5-7.5-5z"/><circle cx="10" cy="10" r="2.2"/></svg></button>
+          <button class="ch-btn ch-more" title="More"><svg viewBox="0 0 20 20"><circle cx="5" cy="10" r="1.1" class="fill"/><circle cx="10" cy="10" r="1.1" class="fill"/><circle cx="15" cy="10" r="1.1" class="fill"/></svg></button>
+        </div><ol class="ch-items"></ol>`;
+      sec.querySelector('.ch-num').textContent = ci + 1;
+      const input = sec.querySelector('.ch-title');
+      input.value = c.title;
+      input.placeholder = `Chapter ${ci + 1}`;
+      sec.querySelector('.ch-upto').classList.toggle('on', !!active && active.id === c.id && active.mode === 'upto');
+      const ol = sec.querySelector('.ch-items');
+      c.items.forEach((id, pi) => {
+        const n = nodes.get(id);
+        const li = document.createElement('li');
+        li.className = 'ch-item';
+        li.draggable = true;
+        li.dataset.node = id;
+        li.dataset.index = pi;
+        li.style.setProperty('--tc', typeColor(n.type));
+        li.innerHTML = '<span class="dot"></span><span class="name"></span><button class="ch-x" title="Remove from chapter">×</button>';
+        li.querySelector('.name').textContent = n.title || 'Untitled';
+        if (cur && cur.ch === c && cur.pi === pi) li.classList.add('current');
+        ol.appendChild(li);
+      });
+      if (!c.items.length) {
+        const em = document.createElement('li');
+        em.className = 'ch-empty';
+        em.textContent = 'Drag nodes here';
+        ol.appendChild(em);
+      }
+      storyList.appendChild(sec);
+    });
+  }
+
+  function drawStoryPath() {
+    const pts = [];
+    if (storyPrefs.path) {
+      let last = null;
+      for (const b of sequence()) {
+        const n = nodes.get(b.id);
+        if (b.id === last || !n || n._vis === false) continue;
+        last = b.id;
+        const c = center(b.id);
+        pts.push(`${c.x.toFixed(1)},${c.y.toFixed(1)}`);
+      }
+    }
+    storyPathEl.setAttribute('d', pts.length > 1 ? 'M' + pts.join('L') : '');
+    $('#story-path-btn').classList.toggle('on', !!storyPrefs.path);
+  }
+
+  function toggleStory(open = storyEl.hidden) {
+    storyEl.hidden = !open;
+    storyPrefs.open = open;
+    saveStoryPrefs();
+    if (open) storyEl.style.top = Math.round($('#bar-left').getBoundingClientRect().bottom + 10) + 'px';
+    renderStory();
+  }
+
+  function addChapter(withNode) {
+    pushHistory();
+    const ch = { id: uid(), title: '', items: withNode ? [withNode] : [] };
+    chapters.push(ch);
+    if (storyEl.hidden) toggleStory(true);
+    storyChanged();
+    renderStory();
+    const input = storyList.querySelector(`.chapter[data-id="${ch.id}"] .ch-title`);
+    if (input) { input.focus(); input.scrollIntoView({ block: 'nearest' }); }
+  }
+
+  function deleteChapter(id) {
+    const i = chapters.findIndex(c => c.id === id);
+    if (i < 0) return;
+    pushHistory();
+    chapters.splice(i, 1);
+    if (filter.chapter && filter.chapter.id === id) filter.chapter = null;
+    applyFilter();
+    storyChanged();
+    toast('Chapter deleted — Ctrl/⌘ Z to undo');
+  }
+
+  function moveChapter(id, to) {
+    const from = chapters.findIndex(c => c.id === id);
+    if (from < 0) return;
+    to = clamp(to, 0, chapters.length);
+    if (to === from || to === from + 1) return;
+    pushHistory();
+    const [ch] = chapters.splice(from, 1);
+    chapters.splice(from < to ? to - 1 : to, 0, ch);
+    storyChanged();
+  }
+
+  // Puts a node at `index` in a chapter (moving it if it's already there).
+  // `from` is the panel position it was dragged from, if any.
+  function placeInChapter(nodeId, ch, index, from) {
+    if (!nodes.has(nodeId) || !chapters.includes(ch)) return;
+    pushHistory();
+    if (from) {
+      from.ch.items.splice(from.index, 1);
+      if (from.ch === ch && from.index < index) index--;
+    }
+    const existing = ch.items.indexOf(nodeId);
+    if (existing >= 0) {
+      ch.items.splice(existing, 1);
+      if (existing < index) index--;
+    }
+    ch.items.splice(clamp(index, 0, ch.items.length), 0, nodeId);
+    storyChanged();
+  }
+
+  function toggleInChapter(nodeId, ch) {
+    if (ch.items.includes(nodeId)) {
+      pushHistory();
+      ch.items = ch.items.filter(x => x !== nodeId);
+      storyChanged();
+    } else {
+      placeInChapter(nodeId, ch, ch.items.length);
+    }
+  }
+
+  function chapterItems(id) {
+    if (!chapters.length) return ['-', { label: 'Start a chapter with this', action: () => addChapter(id) }];
+    return [
+      '-', { heading: 'In chapters' },
+      ...chapters.map((c, ci) => ({ label: `${ci + 1} · ${chapterName(c, ci)}`, checked: c.items.includes(id), action: () => toggleInChapter(id, c) })),
+      { label: 'New chapter with this', action: () => addChapter(id) },
+    ];
+  }
+
+  function toggleChapterFilter(id, mode) {
+    const same = filter.chapter && filter.chapter.id === id && filter.chapter.mode === mode;
+    filter.chapter = same ? null : { id, mode };
+    applyFilter();
+    if (filter.chapter) fitView();
+  }
+
+  // ----- panel drag & drop (native) -----
+
+  function itemDropAt(x, y) {
+    const hit = document.elementFromPoint(x, y);
+    const sec = hit && hit.closest && hit.closest('#story .chapter');
+    if (!sec) return null;
+    const ch = chapters.find(c => c.id === sec.dataset.id);
+    if (!ch) return null;
+    const lis = [...sec.querySelectorAll('.ch-item')];
+    let index = lis.length;
+    for (let i = 0; i < lis.length; i++) {
+      const r = lis[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) { index = i; break; }
+    }
+    return { sec, ch, index, lis };
+  }
+
+  function clearDropMarks() {
+    for (const el of storyEl.querySelectorAll('.drop-before, .drop-after, .drop-into')) {
+      el.classList.remove('drop-before', 'drop-after', 'drop-into');
+    }
+  }
+
+  function showItemDrop(t) {
+    clearDropMarks();
+    if (!t) return;
+    if (!t.lis.length) t.sec.classList.add('drop-into');
+    else if (t.index < t.lis.length) t.lis[t.index].classList.add('drop-before');
+    else t.lis[t.lis.length - 1].classList.add('drop-after');
+  }
+
+  function chapterDropAt(x, y) {
+    const secs = [...storyList.querySelectorAll('.chapter')];
+    let to = secs.length;
+    for (let i = 0; i < secs.length; i++) {
+      const r = secs[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) { to = i; break; }
+    }
+    return { to, secs };
+  }
+
+  let panelDrag = null; // {kind: 'item', ch, index, node} | {kind: 'chapter', id}
+
+  storyList.addEventListener('dragstart', e => {
+    const li = e.target.closest && e.target.closest('.ch-item');
+    const head = e.target.closest && e.target.closest('.ch-head');
+    if (li) {
+      const ch = chapters.find(c => c.id === li.closest('.chapter').dataset.id);
+      panelDrag = { kind: 'item', ch, index: +li.dataset.index, node: li.dataset.node };
+    } else if (head) {
+      panelDrag = { kind: 'chapter', id: head.closest('.chapter').dataset.id };
+    } else return;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+  });
+
+  storyList.addEventListener('dragover', e => {
+    if (!panelDrag) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (panelDrag.kind === 'item') return showItemDrop(itemDropAt(e.clientX, e.clientY));
+    clearDropMarks();
+    const { to, secs } = chapterDropAt(e.clientX, e.clientY);
+    if (!secs.length) return;
+    if (to < secs.length) secs[to].classList.add('drop-before');
+    else secs[secs.length - 1].classList.add('drop-after');
+  });
+
+  storyList.addEventListener('drop', e => {
+    if (!panelDrag) return;
+    e.preventDefault();
+    const d = panelDrag;
+    panelDrag = null;
+    clearDropMarks();
+    if (d.kind === 'item') {
+      const t = itemDropAt(e.clientX, e.clientY);
+      if (t) placeInChapter(d.node, t.ch, t.index, { ch: d.ch, index: d.index });
+    } else {
+      moveChapter(d.id, chapterDropAt(e.clientX, e.clientY).to);
+    }
+  });
+
+  storyList.addEventListener('dragend', () => { panelDrag = null; clearDropMarks(); });
+
+  // ----- panel clicks & editing -----
+
+  storyList.addEventListener('click', e => {
+    const t = e.target;
+    const sec = t.closest('.chapter');
+    if (!sec) return;
+    const ch = chapters.find(c => c.id === sec.dataset.id);
+    if (!ch) return;
+    const li = t.closest('.ch-item');
+    if (t.closest('.ch-x') && li) {
+      pushHistory();
+      ch.items.splice(+li.dataset.index, 1);
+      storyChanged();
+    } else if (li) {
+      const at = sequence().findIndex(b => b.ch === ch && b.pi === +li.dataset.index);
+      if (play && at >= 0) { play.i = at; showBeat(); } else jumpTo(li.dataset.node);
+    } else if (t.closest('.ch-num')) {
+      toggleChapterFilter(ch.id, 'only');
+    } else if (t.closest('.ch-upto')) {
+      toggleChapterFilter(ch.id, 'upto');
+    } else if (t.closest('.ch-more')) {
+      const ci = chapters.indexOf(ch);
+      const r = t.closest('.ch-more').getBoundingClientRect();
+      showMenu([
+        { label: 'Play from here', action: () => startPlay(sequence().findIndex(b => b.ch === ch)) },
+        { label: 'Move up', action: () => moveChapter(ch.id, ci - 1) },
+        { label: 'Move down', action: () => moveChapter(ch.id, ci + 2) },
+        '-',
+        { label: 'Delete chapter', danger: true, action: () => deleteChapter(ch.id) },
+      ], r.left, r.bottom + 6);
+    }
+  });
+
+  let chapterEdit = null;
+  storyList.addEventListener('focusin', e => {
+    if (e.target.classList.contains('ch-title')) chapterEdit = snapshot();
+  });
+  storyList.addEventListener('input', e => {
+    if (!e.target.classList.contains('ch-title')) return;
+    const ch = chapters.find(c => c.id === e.target.closest('.chapter').dataset.id);
+    if (!ch) return;
+    ch.title = e.target.value.slice(0, 200);
+    renderStoryMarks();
+    scheduleSave();
+  });
+  storyList.addEventListener('focusout', e => {
+    if (!e.target.classList.contains('ch-title')) return;
+    const before = chapterEdit;
+    chapterEdit = null;
+    const id = e.target.closest('.chapter').dataset.id;
+    const old = before && before.chapters.find(c => c.id === id);
+    const now = chapters.find(c => c.id === id);
+    if (old && now && old.title !== now.title) pushHistory(before);
+    scheduleStory();
+  });
+  storyList.addEventListener('keydown', e => {
+    if (e.target.classList.contains('ch-title') && (e.key === 'Enter' || e.key === 'Escape')) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.target.blur();
+    }
+  });
+
+  $('#story-add').addEventListener('click', () => addChapter());
+  $('#story-close').addEventListener('click', () => toggleStory(false));
+  $('#story-play').addEventListener('click', () => (play ? stopPlay() : startPlay()));
+  $('#story-path-btn').addEventListener('click', () => {
+    storyPrefs.path = !storyPrefs.path;
+    saveStoryPrefs();
+    drawStoryPath();
+  });
+  storyBtn.addEventListener('click', () => toggleStory());
+  window.addEventListener('resize', () => { if (!storyEl.hidden) toggleStory(true); });
+
+  // ----- play -----
+
+  function startPlay(from) {
+    const seq = sequence();
+    if (!seq.length) return toast('Add nodes to a chapter first');
+    if (from == null) {
+      const ci = filter.chapter ? chapters.findIndex(c => c.id === filter.chapter.id) : -1;
+      from = ci >= 0 ? Math.max(0, seq.findIndex(b => b.ci >= ci)) : 0;
+    }
+    play = { seq, i: clamp(from, 0, seq.length - 1) };
+    playEl.hidden = false;
+    $('#story-play').classList.add('on');
+    showBeat();
+  }
+
+  function stepPlay(d) {
+    if (!play) return;
+    const i = play.i + d;
+    if (i < 0 || i >= play.seq.length) return;
+    play.i = i;
+    showBeat();
+  }
+
+  function stopPlay() {
+    if (!play) return;
+    play = null;
+    playEl.hidden = true;
+    $('#story-play').classList.remove('on');
+    for (const el of nodesLayer.querySelectorAll('.play-current')) el.classList.remove('play-current');
+    scheduleStory();
+  }
+
+  function showBeat() {
+    const b = play.seq[play.i];
+    if (!b || !nodes.has(b.id)) return stopPlay();
+    for (const el of nodesLayer.querySelectorAll('.play-current')) el.classList.remove('play-current');
+    jumpTo(b.id);
+    nodeEls.get(b.id).root.classList.add('play-current');
+    $('#play-chapter').textContent = `${b.ci + 1} · ${chapterName(b.ch, b.ci)}`;
+    $('#play-title').textContent = nodes.get(b.id).title || 'Untitled';
+    $('#play-count').textContent = `${play.i + 1} / ${play.seq.length}`;
+    $('#play-prev').disabled = play.i === 0;
+    $('#play-next').disabled = play.i === play.seq.length - 1;
+    scheduleStory();
+  }
+
+  $('#play-prev').addEventListener('click', () => stepPlay(-1));
+  $('#play-next').addEventListener('click', () => stepPlay(1));
+  $('#play-stop').addEventListener('click', stopPlay);
+
   // ---------- toolbar ----------
 
   let toastTimer = 0;
@@ -1743,9 +2429,10 @@
     toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2400);
   }
 
-  function exportJSON() {
+  async function exportJSON() {
     flushPending();
-    const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: 'application/json' });
+    const data = backend.readImage ? await embeddedImages(serialize()) : serialize();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${Store.slug(project.title) || 'relata'}-${new Date().toISOString().slice(0, 10)}.json`;
@@ -1861,6 +2548,7 @@
       await useBrowser();
     }
     if (firstRun) helpEl.hidden = false;
+    if (storyPrefs.open) toggleStory(true);
     flush();
     refreshCounts();
   }

@@ -14,6 +14,7 @@
     <div id="world">
       <svg id="edges" width="1" height="1" aria-hidden="true">
         <g id="edge-group"></g>
+        <path id="story-path"></path>
         <line id="temp-line" style="display:none"></line>
       </svg>
       <div id="labels"></div>
@@ -35,6 +36,9 @@
     </div>
     <span class="divider"></span>
     <input id="search" type="search" placeholder="Search…" autocomplete="off" spellcheck="false">
+    <button class="icon-btn" id="btn-story" title="Story &amp; chapters (C)">
+      <svg viewBox="0 0 20 20"><path d="M4 4.5c2-.8 4-.8 6 .5v11c-2-1.3-4-1.3-6-.5zM16 4.5c-2-.8-4-.8-6 .5v11c2-1.3 4-1.3 6-.5z"/></svg>
+    </button>
     <button class="icon-btn" id="btn-fit" title="Fit all (F)">
       <svg viewBox="0 0 20 20"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>
     </button>
@@ -50,6 +54,34 @@
     <button class="icon-btn" id="btn-help" title="Help">
       <svg viewBox="0 0 20 20"><path d="M7.5 7.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5v.7"/><circle cx="10" cy="15" r=".6" class="fill"/></svg>
     </button>
+  </div>
+
+  <aside class="ui panel" id="story" hidden>
+    <div class="story-head">
+      <span class="story-title">Story</span>
+      <button class="icon-btn" id="story-play" title="Play the story in order (P)">
+        <svg viewBox="0 0 20 20"><path d="M7 5l8 5-8 5z"/></svg>
+      </button>
+      <button class="icon-btn" id="story-path-btn" title="Show the story path on the map">
+        <svg viewBox="0 0 20 20"><circle cx="4.5" cy="14.5" r="1.8"/><circle cx="15.5" cy="5.5" r="1.8"/><path d="M6 13.5c3-1 2-5 5-6.5 1.2-.6 2-.8 3-.9" stroke-dasharray="1.5 2.5"/></svg>
+      </button>
+      <button class="icon-btn" id="story-add" title="New chapter">
+        <svg viewBox="0 0 20 20"><path d="M10 4.5v11M4.5 10h11"/></svg>
+      </button>
+      <button class="icon-btn" id="story-close" title="Close (C)">
+        <svg viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg>
+      </button>
+    </div>
+    <div id="story-list"></div>
+    <p class="story-foot">Drag nodes from the map onto a chapter. Click a number to show only that chapter, the eye for what the reader knows up to there.</p>
+  </aside>
+
+  <div class="ui panel" id="play" hidden>
+    <button class="icon-btn" id="play-prev" title="Previous (←)"><svg viewBox="0 0 20 20"><path d="M12 5l-5 5 5 5"/></svg></button>
+    <div class="play-text"><span id="play-chapter"></span><span id="play-title"></span></div>
+    <span id="play-count"></span>
+    <button class="icon-btn" id="play-next" title="Next (→)"><svg viewBox="0 0 20 20"><path d="M8 5l5 5-5 5"/></svg></button>
+    <button class="icon-btn" id="play-stop" title="Stop (Esc)"><svg viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button>
   </div>
 
   <div class="ui" id="status"></div>
@@ -83,7 +115,8 @@
         <dt>Relate</dt><dd>Drag from a node's <em>edge</em>. Drop on another node to connect them, or on empty space to create a new connected node.</dd>
         <dt>Create</dt><dd>Double-click empty space, or right-click for a typed node.</dd>
         <dt>Focus</dt><dd>Click a type (on a node or up top) to show only that type. Click empty space to show everything.</dd>
-        <dt>Images</dt><dd>Drop or paste an image onto a node, or right-click › Add image.</dd>
+        <dt>Images</dt><dd>Drop or paste an image onto a node, or right-click › Add image. It appears as its own image node, attached to and named after that node.</dd>
+        <dt>Story</dt><dd>Open the story panel (<kbd>C</kbd>), add chapters, drag nodes onto them and order them. <kbd>P</kbd> plays the story in order with <kbd>←</kbd> <kbd>→</kbd>.</dd>
         <dt>Connections</dt><dd>Double-click a line to label it. Click it and press Delete to remove.</dd>
         <dt>Navigate</dt><dd>Scroll to zoom, drag empty space (or hold Space) to pan. <kbd>F</kbd> fits all, <kbd>0</kbd> centers the first node.</dd>
         <dt>Undo</dt><dd><kbd>Ctrl/⌘ Z</kbd> · redo <kbd>Ctrl/⌘ Shift Z</kbd>. Right-click a node to change its type or delete it.</dd>
