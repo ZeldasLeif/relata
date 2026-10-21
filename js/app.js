@@ -31,6 +31,10 @@
   const emptyHint = $('#empty-hint');
   const importInput = $('#file-import');
   const imageInput = $('#file-image');
+  const titleInput = $('#project-title');
+  const projectsBtn = $('#btn-projects');
+  const connectEl = $('#connect');
+  const Store = window.RelataStore;
   document.documentElement.style.setProperty('--node-w', NODE_W + 'px');
 
   // ---------- state ----------
@@ -228,6 +232,7 @@
     const el = nodeEls.get(n.id);
     el.body.textContent = '';
     el.text = null;
+    dropMentions(n.id);
     el.root.classList.toggle('is-image', n.kind === 'image');
     if (n.kind === 'image') {
       const img = document.createElement('img');
@@ -245,6 +250,7 @@
       t.innerHTML = n.body;
       el.body.appendChild(t);
       el.text = t;
+      if (!bulkLoading) scanMentions(n.id);
     }
   }
 
@@ -263,6 +269,7 @@
     applyFilter();
     refreshCounts();
     scheduleSave();
+    scheduleMentionRescan();
     return n;
   }
 
@@ -272,9 +279,11 @@
     if (el) { ro.unobserve(el.root); el.root.remove(); }
     if (selected && selected.kind === 'node' && selected.id === id) selected = null;
     if (editSession && editSession.id === id) editSession = null;
+    dropMentions(id);
     nodes.delete(id);
     nodeEls.delete(id);
     adj.delete(id);
+    if (!bulkLoading) scheduleMentionRescan();
   }
 
   function bringToFront(id) {
@@ -284,12 +293,45 @@
 
   // ---------- edges ----------
 
-  function makeEdge(a, b, label, id) {
+  const DASHES = ['solid', 'dashed', 'dotted'];
+  const DEFAULT_WIDTH = 1.5;
+
+  function makeEdge(a, b, label, id, style = {}) {
+    const w = +style.width;
     return {
       id: typeof id === 'string' && id && !edges.has(id) ? id : uid(),
       a: String(a), b: String(b),
       label: typeof label === 'string' ? label.replace(/\s+/g, ' ').trim().slice(0, 200) : '',
+      color: typeof style.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(style.color) ? style.color : '',
+      width: Number.isFinite(w) && w > 0 ? clamp(w, 0.5, 8) : DEFAULT_WIDTH,
+      dash: DASHES.includes(style.dash) ? style.dash : 'solid',
     };
+  }
+
+  function dashArray(dash, w) {
+    if (dash === 'dashed') return `${(4 * w + 2).toFixed(1)} ${(3 * w + 3).toFixed(1)}`;
+    if (dash === 'dotted') return `0 ${(2.6 * w + 2).toFixed(1)}`;
+    return '';
+  }
+
+  function paintEdgeStyle(e) {
+    const ee = edgeEls.get(e.id);
+    if (!ee) return;
+    ee.line.style.stroke = e.color;
+    ee.line.classList.toggle('colored', !!e.color);
+    ee.line.style.strokeWidth = e.width;
+    ee.line.style.strokeDasharray = dashArray(e.dash, e.width);
+    ee.hit.style.strokeWidth = Math.max(14, e.width + 10);
+    if (ee.label) ee.label.style.borderColor = e.color ? `color-mix(in oklab, ${e.color} 60%, transparent)` : '';
+  }
+
+  function styleEdge(eid, patch) {
+    const e = edges.get(eid);
+    if (!e || Object.keys(patch).every(k => e[k] === patch[k])) return;
+    pushHistory();
+    Object.assign(e, patch);
+    paintEdgeStyle(e);
+    scheduleSave();
   }
 
   function findEdge(a, b) {
@@ -316,6 +358,7 @@
     edgeGroup.appendChild(g);
     edgeEls.set(e.id, { g, hit, line, label: null });
     if (e.label) ensureLabel(e);
+    paintEdgeStyle(e);
     drawEdge(e.id);
     return e;
   }
@@ -354,6 +397,7 @@
     if (edges.has(e.id) && ee.g.classList.contains('is-hidden')) l.classList.add('is-hidden');
     labelsLayer.appendChild(l);
     ee.label = l;
+    paintEdgeStyle(e);
     return l;
   }
 
@@ -464,8 +508,10 @@
     edgeGroup.textContent = '';
     labelsLayer.textContent = '';
     nodes.clear(); edges.clear(); adj.clear(); nodeEls.clear(); edgeEls.clear();
+    clearMentions();
     selected = null;
     editSession = null;
+    bulkLoading = true;
     const frag = document.createDocumentFragment();
     for (const d of Array.isArray(data && data.nodes) ? data.nodes : []) {
       if (!d || typeof d !== 'object') continue;
@@ -478,8 +524,10 @@
     nodesLayer.appendChild(frag);
     for (const d of Array.isArray(data && data.edges) ? data.edges : []) {
       if (!d || typeof d !== 'object') continue;
-      insertEdge(makeEdge(d.a, d.b, d.label, d.id));
+      insertEdge(makeEdge(d.a, d.b, d.label, d.id, d));
     }
+    bulkLoading = false;
+    rescanAllMentions();
     applyFilter();
     refreshCounts();
   }
@@ -488,20 +536,31 @@
     return {
       app: 'relata',
       version: 1,
+      title: project.title,
       savedAt: new Date().toISOString(),
       nodes: [...nodes.values()].map(n => ({
         id: n.id, type: n.type, title: n.title, kind: n.kind,
         body: n.body, image: n.kind === 'image' ? n.image : '',
         x: Math.round(n.x), y: Math.round(n.y),
       })),
-      edges: [...edges.values()].map(e => ({ id: e.id, a: e.a, b: e.b, label: e.label })),
+      edges: [...edges.values()].map(e => ({
+        id: e.id, a: e.a, b: e.b, label: e.label, color: e.color, width: e.width, dash: e.dash,
+      })),
     };
   }
 
+  // ---------- projects & autosave ----------
+  // Every change is written (debounced) to the current project's backend:
+  // a .json file in the data folder, or the browser's own storage.
+
+  let backend = Store.browser;
+  const project = { id: null, title: '' };
   let saveTimer = 0;
   let saveState = 'saved';
+  let saveChain = Promise.resolve();
 
   function scheduleSave() {
+    if (!project.id) return;
     setSaveState('pending');
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveNow, 400);
@@ -510,13 +569,26 @@
   function saveNow() {
     clearTimeout(saveTimer);
     saveTimer = 0;
-    return RelataStore.save(serialize())
-      .then(() => { if (!saveTimer) setSaveState('saved'); })
+    if (!project.id) return saveChain;
+    const target = backend, id = project.id, data = serialize();
+    saveChain = saveChain
+      .then(() => target.write(id, data))
+      .then(() => {
+        if (!saveTimer) setSaveState('saved');
+        target.backup(id, data).catch(err => console.warn('Backup failed', err));
+      })
       .catch(err => {
         console.error(err);
         setSaveState('error');
-        toast('Could not save locally — please export a backup.');
+        toast(target.kind === 'folder'
+          ? `Could not write ${id} — check the data folder, or export a backup.`
+          : 'Could not save locally — please export a backup.');
       });
+    return saveChain;
+  }
+
+  function flushSave() {
+    return saveTimer ? saveNow() : saveChain;
   }
 
   function setSaveState(s) {
@@ -525,15 +597,288 @@
   }
 
   function renderStatus() {
-    const words = { saved: 'saved', pending: 'saving…', error: 'not saved' };
+    const where = backend.kind === 'folder' ? `${backend.label}/${project.id || ''}` : 'this browser';
+    const words = { saved: `saved to ${where}`, pending: 'saving…', error: 'not saved' };
     statusEl.className = 'ui ' + saveState;
-    statusEl.innerHTML = `${nodes.size} node${nodes.size === 1 ? '' : 's'} · ${edges.size} connection${edges.size === 1 ? '' : 's'}<span class="dot"></span>${words[saveState]}`;
+    statusEl.innerHTML = `${nodes.size} node${nodes.size === 1 ? '' : 's'} · ${edges.size} connection${edges.size === 1 ? '' : 's'}<span class="dot"></span>`;
+    statusEl.appendChild(document.createTextNode(words[saveState]));
   }
 
   const flushPending = () => { if (saveTimer) saveNow(); };
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushPending(); });
   window.addEventListener('pagehide', flushPending);
   window.addEventListener('beforeunload', flushPending);
+
+  function blankProject(title) {
+    return { app: 'relata', version: 1, title, nodes: [], edges: [] };
+  }
+
+  async function openProject(id, { center = true } = {}) {
+    await flushSave();
+    let data;
+    try { data = await backend.read(id); } catch (err) {
+      console.error(err);
+      toast('Could not open that project');
+      return false;
+    }
+    if (!data || !Array.isArray(data.nodes)) { toast('That file is not a relata project'); return false; }
+    project.id = id;
+    project.renamePending = false;
+    project.title = typeof data.title === 'string' && data.title.trim() ? data.title.trim() : String(id).replace(/\.json$/i, '');
+    titleInput.value = project.title;
+    document.title = `${project.title} · relata`;
+    history.length = 0;
+    future.length = 0;
+    filter.type = null; filter.query = ''; searchEl.value = '';
+    loadData(data);
+    if (!nodes.size) { seedFirst(); scheduleSave(); }
+    if (center) centerFirst(false);
+    Store.kvSet('last', { kind: backend.kind, id }).catch(() => {});
+    renderStatus();
+    return true;
+  }
+
+  async function openLatest() {
+    let list = [];
+    try { list = await backend.list(); } catch (err) { console.error(err); }
+    if (!list.length) return newProject('Untitled world');
+    // The project open last time comes first, then the most recently modified file.
+    const last = await Store.kvGet('last').catch(() => null);
+    const rank = p => (last && last.kind === backend.kind && last.id === p.id ? Infinity : p.modified);
+    list.sort((a, b) => rank(b) - rank(a));
+    for (const p of list) if (await openProject(p.id)) return;
+    return newProject('Untitled world');
+  }
+
+  async function newProject(title = 'Untitled world', data = blankProject(title)) {
+    await flushSave();
+    let id;
+    try { id = await backend.create(title, { ...data, title }); } catch (err) {
+      console.error(err);
+      toast('Could not create the project');
+      return;
+    }
+    await openProject(id);
+  }
+
+  async function renameProject() {
+    const title = titleInput.value.replace(/\s+/g, ' ').trim() || 'Untitled world';
+    titleInput.value = title;
+    if (title === project.title && !project.renamePending) return;
+    project.title = title;
+    project.renamePending = false;
+    document.title = `${title} · relata`;
+    await saveNow();
+    try {
+      const id = await backend.rename(project.id, title);
+      if (id !== project.id) {
+        project.id = id;
+        Store.kvSet('last', { kind: backend.kind, id }).catch(() => {});
+        renderStatus();
+      }
+    } catch (err) { console.warn('Rename failed', err); }
+  }
+
+  titleInput.addEventListener('input', () => {
+    project.title = titleInput.value.replace(/\s+/g, ' ').trim() || 'Untitled world';
+    project.renamePending = true;
+    scheduleSave();
+  });
+  titleInput.addEventListener('change', renameProject);
+  titleInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); titleInput.blur(); }
+  });
+
+  async function useBackend(next) {
+    await flushSave();
+    backend = next;
+    renderStatus();
+  }
+
+  // Connects a data folder. An empty folder receives the project currently open.
+  async function connectFolder(dir) {
+    const folder = Store.folder(dir);
+    let list = [];
+    try { list = await folder.list(); } catch (err) { console.error(err); toast('Could not read that folder'); return false; }
+    const carry = !list.length && project.id && nodes.size ? serialize() : null;
+    await useBackend(folder);
+    project.id = null;
+    if (carry) await newProject(carry.title || 'Untitled world', carry);
+    else await openLatest();
+    toast(`Saving to folder “${dir.name}”`);
+    return true;
+  }
+
+  async function chooseFolder() {
+    let dir;
+    try { dir = await Store.pickFolder(); } catch (err) {
+      if (err && err.name !== 'AbortError') { console.error(err); toast('Could not open that folder'); }
+      return false;
+    }
+    return connectFolder(dir);
+  }
+
+  async function useBrowserStorage() {
+    await Store.forgetFolder();
+    await useBackend(Store.browser);
+    project.id = null;
+    await openLatest();
+  }
+
+  function relTime(ms) {
+    const s = (Date.now() - ms) / 1000;
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    if (s < 86400 * 30) return Math.round(s / 86400) + ' d ago';
+    return new Date(ms).toLocaleDateString();
+  }
+
+  async function openProjectMenu() {
+    await flushSave();
+    let list = [];
+    try { list = await backend.list(); } catch (err) { console.error(err); }
+    list.sort((a, b) => b.modified - a.modified);
+    const items = [{ heading: backend.kind === 'folder' ? `Folder · ${backend.label}` : 'In this browser' }];
+    for (const p of list) {
+      items.push({
+        label: p.title, className: 'project', checked: p.id === project.id,
+        hint: p.id === project.id ? '' : relTime(p.modified),
+        title: backend.kind === 'folder' ? p.id : '',
+        action: () => { if (p.id !== project.id) openProject(p.id); },
+      });
+    }
+    items.push('-', { label: 'New project', action: () => newProject('Untitled world').then(() => { titleInput.focus(); titleInput.select(); }) });
+    if (Store.folderSupported) {
+      if (backend.kind === 'folder') {
+        items.push({ label: 'Change data folder…', action: chooseFolder },
+          { label: 'Keep projects in this browser instead', action: useBrowserStorage });
+      } else {
+        items.push({ label: 'Save to a data folder…', action: chooseFolder });
+      }
+    } else {
+      items.push({ note: 'Saving into a data folder needs Chrome, Edge or another Chromium browser. Here, projects live in this browser — export now and then.' });
+    }
+    const r = projectsBtn.getBoundingClientRect();
+    showMenu(items, r.right - 240, r.bottom + 8);
+  }
+
+  projectsBtn.addEventListener('click', () => {
+    if (menuEl.hidden) openProjectMenu(); else hideMenu();
+  });
+
+  // ---------- mentions ----------
+  // Another node's exact title inside a text becomes a link. Nothing is stored or inserted
+  // into the text: matches are found on the fly and painted with the CSS Highlight API,
+  // so renaming a node updates every link and the caret is never disturbed while writing.
+
+  const MIN_TITLE = 3;
+  const mentionHL = window.CSS && CSS.highlights && typeof window.Highlight === 'function' ? new Highlight() : null;
+  if (mentionHL) CSS.highlights.set('mention', mentionHL);
+  const mentionRanges = new Map(); // nodeId -> [{range, target}]
+  const titleTargets = new Map();  // normalized title -> nodeId
+  let titleRegex = null;
+  let bulkLoading = false;
+  let rescanTimer = 0;
+
+  const normTitle = s => s.replace(/\s+/g, ' ').trim().toLowerCase();
+  const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  function rebuildTitleIndex() {
+    titleTargets.clear();
+    for (const n of nodes.values()) {
+      const k = normTitle(n.title);
+      if (k.length >= MIN_TITLE && !titleTargets.has(k)) titleTargets.set(k, n.id);
+    }
+    const keys = [...titleTargets.keys()].sort((a, b) => b.length - a.length)
+      .map(k => escapeRe(k).replace(/ /g, '\\s+'));
+    titleRegex = keys.length ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${keys.join('|')})(?![\\p{L}\\p{N}])`, 'giu') : null;
+  }
+
+  function dropMentions(id) {
+    const old = mentionRanges.get(id);
+    if (old && mentionHL) for (const m of old) mentionHL.delete(m.range);
+    mentionRanges.delete(id);
+  }
+
+  function clearMentions() {
+    mentionHL?.clear();
+    mentionRanges.clear();
+  }
+
+  function scanMentions(id) {
+    dropMentions(id);
+    const el = nodeEls.get(id);
+    if (!el || !el.text || !titleRegex) return;
+    // Flatten the text, remembering where each text node starts.
+    const parts = [];
+    let str = '';
+    const walker = document.createTreeWalker(el.text, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.nodeType === 3) { parts.push([node, str.length]); str += node.nodeValue; }
+      else if (node.tagName === 'BR' || node.tagName === 'DIV' || node.tagName === 'P') str += '\n';
+    }
+    if (!parts.length) return;
+    const locate = (pos, isEnd) => {
+      for (const [node, start] of parts) {
+        const end = start + node.nodeValue.length;
+        if (isEnd ? pos > start && pos <= end : pos >= start && pos < end) return [node, pos - start];
+      }
+      return null;
+    };
+    const list = [];
+    titleRegex.lastIndex = 0;
+    for (let m = titleRegex.exec(str); m; m = titleRegex.exec(str)) {
+      const target = titleTargets.get(normTitle(m[0]));
+      if (!target || target === id) continue;
+      const s = locate(m.index, false), e = locate(m.index + m[0].length, true);
+      if (!s || !e) continue;
+      const range = document.createRange();
+      range.setStart(s[0], s[1]);
+      range.setEnd(e[0], e[1]);
+      list.push({ range, target });
+      mentionHL?.add(range);
+    }
+    if (list.length) mentionRanges.set(id, list);
+  }
+
+  function rescanAllMentions() {
+    clearTimeout(rescanTimer);
+    rescanTimer = 0;
+    rebuildTitleIndex();
+    clearMentions();
+    for (const id of nodes.keys()) scanMentions(id);
+  }
+
+  // Titles changed (typed, created, deleted): rebuild all links shortly after.
+  function scheduleMentionRescan() {
+    clearTimeout(rescanTimer);
+    rescanTimer = setTimeout(rescanAllMentions, 350);
+  }
+
+  function mentionAt(id, x, y) {
+    for (const m of mentionRanges.get(id) || []) {
+      for (const r of m.range.getClientRects()) {
+        if (x >= r.left - 1 && x <= r.right + 1 && y >= r.top - 1 && y <= r.bottom + 1) return m.target;
+      }
+    }
+    return null;
+  }
+
+  function jumpTo(id) {
+    const n = nodes.get(id);
+    if (!n) return;
+    if (n._vis === false) clearFilter();
+    blurEditing();
+    select({ kind: 'node', id });
+    centerOn(id, Math.max(view.s, 0.85));
+    const root = nodeEls.get(id).root;
+    root.classList.remove('pulse');
+    void root.offsetWidth;
+    root.classList.add('pulse');
+    setTimeout(() => root.classList.remove('pulse'), 2100);
+  }
+
 
   // ---------- filter & legend ----------
 
@@ -770,7 +1115,12 @@
     }
 
     const ed = t.closest('[contenteditable="true"]');
-    if (ed && ed === document.activeElement) return; // native text editing / selection
+    if (ed && ed === document.activeElement) {
+      // Ctrl/⌘-click follows a mention while writing; anything else is native editing.
+      const target = (e.ctrlKey || e.metaKey) && ed.classList.contains('text') && mentionAt(id, e.clientX, e.clientY);
+      if (target) { blockNative = true; jumpTo(target); }
+      return;
+    }
 
     blockNative = true;
     gesture = { kind: 'press', id, t, sx: e.clientX, sy: e.clientY, ox: n.x, oy: n.y, moved: false, snap: null };
@@ -866,7 +1216,9 @@
     } else if (t.closest('.title')) {
       focusAt(el.title, e.clientX, e.clientY);
     } else if (n.kind === 'text' && t.closest('.body')) {
-      focusAt(el.text, e.clientX, e.clientY);
+      const target = mentionAt(id, e.clientX, e.clientY);
+      if (target) jumpTo(target);
+      else focusAt(el.text, e.clientX, e.clientY);
     } else {
       blurEditing();
     }
@@ -911,6 +1263,10 @@
       on?.classList.add('edge-hover');
       hoverNode = on;
     }
+    const text = !on && nodeEl && e.target.closest('.text');
+    const overMention = !!text && (text !== document.activeElement || e.ctrlKey || e.metaKey) &&
+      !!mentionAt(nodeEl.dataset.id, e.clientX, e.clientY);
+    document.body.classList.toggle('over-mention', overMention);
   });
   viewport.addEventListener('pointerleave', () => {
     hoverNode?.classList.remove('edge-hover');
@@ -982,9 +1338,11 @@
     if (ed.classList.contains('title')) {
       if (ed.innerHTML === '<br>') ed.innerHTML = '';
       n.title = ed.textContent.replace(/[\r\n\t]+/g, ' ');
+      scheduleMentionRescan();
     } else if (ed.classList.contains('text')) {
       if (ed.innerHTML === '<br>') ed.innerHTML = '';
       n.body = Sanitize.rich(ed.innerHTML);
+      scanMentions(n.id);
     }
     scheduleSave();
   });
@@ -1163,28 +1521,43 @@
 
   function showMenu(items, x, y) {
     menuEl.textContent = '';
+    const el = (tag, className, text) => {
+      const n = document.createElement(tag);
+      if (className) n.className = className;
+      if (text != null) n.textContent = text;
+      return n;
+    };
+    const pick = (b, action) => b.addEventListener('click', () => { hideMenu(); action(); });
     for (const it of items) {
       if (it === '-') {
-        menuEl.appendChild(Object.assign(document.createElement('div'), { className: 'sep' }));
+        menuEl.appendChild(el('div', 'sep'));
       } else if (it.heading) {
-        menuEl.appendChild(Object.assign(document.createElement('div'), { className: 'heading', textContent: it.heading }));
+        menuEl.appendChild(el('div', 'heading', it.heading));
+      } else if (it.note) {
+        menuEl.appendChild(el('div', 'note', it.note));
+      } else if (it.swatches || it.options) {
+        const row = el('div', 'row');
+        for (const o of it.swatches || it.options) {
+          const b = el('button', (it.swatches ? 'swatch' : 'opt') + (o.checked ? ' on' : ''));
+          b.title = o.title;
+          if (it.swatches) b.style.background = o.color || 'var(--edge-hi)';
+          else b.innerHTML = o.svg;
+          pick(b, o.action);
+          row.appendChild(b);
+        }
+        menuEl.appendChild(row);
       } else {
-        const b = document.createElement('button');
-        b.className = 'mi' + (it.danger ? ' danger' : '') + (it.color ? ' typed' : '');
+        const b = el('button', 'mi' + (it.danger ? ' danger' : '') + (it.color ? ' typed' : '') + (it.className ? ' ' + it.className : ''));
+        if (it.title) b.title = it.title;
         if (it.color) {
-          const dot = document.createElement('span');
-          dot.className = 'dot';
+          const dot = el('span', 'dot');
           dot.style.background = it.color;
           b.appendChild(dot);
         }
         b.appendChild(document.createTextNode(it.label));
-        if (it.checked) {
-          const c = document.createElement('span');
-          c.className = 'check';
-          c.textContent = '✓';
-          b.appendChild(c);
-        }
-        b.addEventListener('click', () => { hideMenu(); it.action(); });
+        if (it.hint) b.appendChild(el('span', 'hint', it.hint));
+        if (it.checked) b.appendChild(el('span', 'check', '✓'));
+        pick(b, it.action);
         menuEl.appendChild(b);
       }
     }
@@ -1199,7 +1572,7 @@
   }
 
   window.addEventListener('pointerdown', e => {
-    if (!menuEl.hidden && !menuEl.contains(e.target)) hideMenu();
+    if (!menuEl.hidden && !menuEl.contains(e.target) && !projectsBtn.contains(e.target)) hideMenu();
   }, true);
 
   function typeItems(id) {
@@ -1240,6 +1613,29 @@
     scheduleSave();
   }
 
+  function lineSample(width, dash) {
+    const da = dashArray(dash, width);
+    return `<svg viewBox="0 0 36 12" width="36" height="12"><line x1="4" y1="6" x2="32" y2="6" stroke="currentColor" stroke-width="${width}" stroke-linecap="round"${da ? ` stroke-dasharray="${da}"` : ''}/></svg>`;
+  }
+
+  // Style changes apply immediately and reopen the menu so options can be tried in a row.
+  function openEdgeMenu(eid, x, y) {
+    const e = edges.get(eid);
+    if (!e) return;
+    const restyle = patch => () => { styleEdge(eid, patch); openEdgeMenu(eid, x, y); };
+    showMenu([
+      { label: e.label ? 'Edit label' : 'Add label', action: () => editEdgeLabel(eid) },
+      { heading: 'Color' },
+      { swatches: (CFG.edgeColors || []).map(c => ({ color: c.color, title: c.name, checked: e.color === c.color, action: restyle({ color: c.color }) })) },
+      { heading: 'Thickness' },
+      { options: (CFG.edgeWidths || []).map(w => ({ svg: lineSample(w.width, 'solid'), title: w.name, checked: e.width === w.width, action: restyle({ width: w.width }) })) },
+      { heading: 'Line' },
+      { options: DASHES.map(d => ({ svg: lineSample(Math.max(e.width, 1.5), d), title: d[0].toUpperCase() + d.slice(1), checked: e.dash === d, action: restyle({ dash: d }) })) },
+      '-',
+      { label: 'Delete connection', danger: true, action: () => deleteEdge(eid) },
+    ], x, y);
+  }
+
   viewport.addEventListener('contextmenu', e => {
     const t = e.target;
     const ed = t.closest('[contenteditable="true"]');
@@ -1263,11 +1659,7 @@
     if (edgeEl) {
       const eid = edgeEl.dataset.id;
       select({ kind: 'edge', id: eid });
-      showMenu([
-        { label: edges.get(eid).label ? 'Edit label' : 'Add label', action: () => editEdgeLabel(eid) },
-        '-',
-        { label: 'Delete connection', danger: true, action: () => deleteEdge(eid) },
-      ], e.clientX, e.clientY);
+      openEdgeMenu(eid, e.clientX, e.clientY);
       return;
     }
     const p = toWorld(e.clientX, e.clientY);
@@ -1356,26 +1748,21 @@
     const blob = new Blob([JSON.stringify(serialize(), null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `relata-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${Store.slug(project.title) || 'relata'}-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
 
+  // Imported files become a new project next to the existing ones.
   function importFile(file) {
     file.text().then(txt => {
       let data;
       try { data = JSON.parse(txt); } catch (err) { return toast('That file is not valid JSON'); }
       if (!data || !Array.isArray(data.nodes)) return toast('No nodes found in that file');
-      if (nodes.size && !confirm(`Replace the current world (${nodes.size} nodes) with “${file.name}”?\nYou can undo this with Ctrl/⌘ Z.`)) return;
-      pushHistory();
-      filter.type = null; filter.query = ''; searchEl.value = '';
-      loadData(data);
-      if (!nodes.size) seedFirst();
-      centerFirst();
-      scheduleSave();
-      toast(`Imported ${nodes.size} node${nodes.size === 1 ? '' : 's'}`);
+      const title = typeof data.title === 'string' && data.title.trim() ? data.title.trim() : file.name.replace(/\.json$/i, '');
+      newProject(title, data).then(() => toast(`Imported “${title}” as a new project`));
     });
   }
 
@@ -1407,18 +1794,75 @@
     refreshCounts();
   }
 
+  // A small blocking card for the storage choice; resolves once an action succeeds.
+  function showConnect({ sub, text, actions, fine }) {
+    return new Promise(resolve => {
+      $('#connect-sub').textContent = sub;
+      $('#connect-text').textContent = text;
+      $('#connect-fine').textContent = fine || '';
+      const box = $('#connect-actions');
+      box.textContent = '';
+      actions.forEach((a, i) => {
+        const b = document.createElement('button');
+        b.className = 'btn' + (i === 0 ? ' primary' : '');
+        b.textContent = a.label;
+        b.addEventListener('click', async () => {
+          if ((await a.run()) === false) return;
+          connectEl.hidden = true;
+          resolve();
+        });
+        box.appendChild(b);
+      });
+      connectEl.hidden = false;
+    });
+  }
+
   async function init() {
     try { document.execCommand('styleWithCSS', false, false); } catch (err) { /* ignore */ }
     buildLegend();
-    let data = null;
-    try { data = await RelataStore.load(); } catch (err) { console.warn(err); }
-    if (data && Array.isArray(data.nodes)) loadData(data);
-    if (!nodes.size) seedFirst();
-    if (!data) helpEl.hidden = false;
     centerFirst(false);
     flush();
+    await Store.migrateLegacy().catch(err => console.warn(err));
+    const browserProjects = await Store.browser.list().catch(() => []);
+    const firstRun = !browserProjects.length && !(await Store.kvGet('dir'));
+    let saved = null;
+    try { saved = await Store.savedFolder(); } catch (err) { console.warn(err); }
+    const useBrowser = async () => { backend = Store.browser; await openLatest(); };
+
+    if (saved && saved.granted) {
+      backend = Store.folder(saved.dir);
+      await openLatest();
+    } else if (saved) {
+      await showConnect({
+        sub: 'Welcome back.',
+        text: `Your worlds are saved in the folder “${saved.dir.name}”. The browser needs your permission again to open it.`,
+        actions: [
+          { label: 'Reconnect folder', run: async () => {
+            try { if (!(await Store.regrant(saved.dir))) return false; } catch (err) { return false; }
+            backend = Store.folder(saved.dir);
+            await openLatest();
+          } },
+          { label: 'Choose another folder', run: chooseFolder },
+          { label: 'Use browser storage', run: useBrowserStorage },
+        ],
+        fine: 'Tip: if Chrome offers “Allow on every visit”, choose it to skip this step next time.',
+      });
+    } else if (firstRun && Store.folderSupported) {
+      await showConnect({
+        sub: 'A quiet canvas for the relationships in your world.',
+        text: 'Where should your worlds be saved? Choose the “data” folder next to index.html (or the relata folder itself). Every change is then written straight into a .json file there, so nothing depends on remembering to export.',
+        actions: [
+          { label: 'Choose data folder', run: chooseFolder },
+          { label: 'Keep in this browser', run: useBrowser },
+        ],
+        fine: 'You can change this later from the project menu (⌄ next to the project title).',
+      });
+    } else {
+      await useBrowser();
+    }
+    if (firstRun) helpEl.hidden = false;
+    flush();
     refreshCounts();
-    if (!data) scheduleSave();
   }
 
   init();

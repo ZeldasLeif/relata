@@ -27,6 +27,13 @@
   </header>
 
   <div class="ui panel" id="bar-right">
+    <div class="project">
+      <input id="project-title" type="text" placeholder="Untitled world" autocomplete="off" spellcheck="false" title="Project title">
+      <button class="icon-btn" id="btn-projects" title="Switch project">
+        <svg viewBox="0 0 20 20"><path d="M6 8l4 4 4-4"/></svg>
+      </button>
+    </div>
+    <span class="divider"></span>
     <input id="search" type="search" placeholder="Search…" autocomplete="off" spellcheck="false">
     <button class="icon-btn" id="btn-fit" title="Fit all (F)">
       <svg viewBox="0 0 20 20"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>
@@ -80,8 +87,21 @@
         <dt>Connections</dt><dd>Double-click a line to label it. Click it and press Delete to remove.</dd>
         <dt>Navigate</dt><dd>Scroll to zoom, drag empty space (or hold Space) to pan. <kbd>F</kbd> fits all, <kbd>0</kbd> centers the first node.</dd>
         <dt>Undo</dt><dd><kbd>Ctrl/⌘ Z</kbd> · redo <kbd>Ctrl/⌘ Shift Z</kbd>. Right-click a node to change its type or delete it.</dd>
-        <dt>Saving</dt><dd>Everything is saved automatically in this browser. Use Export for backups or to move to another browser.</dd>
+        <dt>Mentions</dt><dd>Write another node's exact title in a text and it becomes an underlined link. Click it to jump there (Ctrl/⌘-click while writing).</dd>
+        <dt>Lines</dt><dd>Right-click a connection to change its color, thickness or dash.</dd>
+        <dt>Projects</dt><dd>Edit the project title at the top right; the ⌄ next to it switches or creates projects.</dd>
+        <dt>Saving</dt><dd>Every change is saved automatically — into your data folder as <code>.json</code> (Chrome/Edge), otherwise inside this browser. Daily snapshots go to <code>data/backups/</code>.</dd>
       </dl>
+    </div>
+  </div>
+
+  <div class="ui" id="connect" hidden>
+    <div class="panel help-card connect-card">
+      <h2>relata</h2>
+      <p class="sub" id="connect-sub"></p>
+      <p id="connect-text"></p>
+      <div class="actions" id="connect-actions"></div>
+      <p class="fine" id="connect-fine"></p>
     </div>
   </div>
 
