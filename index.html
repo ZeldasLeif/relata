@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relata</title>
+  <script>
+    try { const t = localStorage.getItem('relata.theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="viewport">
+    <div id="world">
+      <svg id="edges" width="1" height="1" aria-hidden="true">
+        <g id="edge-group"></g>
+        <line id="temp-line" style="display:none"></line>
+      </svg>
+      <div id="labels"></div>
+      <div id="nodes"></div>
+    </div>
+  </div>
+
+  <header class="ui panel" id="bar-left">
+    <div class="brand">relata</div>
+    <div id="legend"></div>
+  </header>
+
+  <div class="ui panel" id="bar-right">
+    <input id="search" type="search" placeholder="Search…" autocomplete="off" spellcheck="false">
+    <button class="icon-btn" id="btn-fit" title="Fit all (F)">
+      <svg viewBox="0 0 20 20"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-export" title="Export JSON">
+      <svg viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M4 16h12"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-import" title="Import JSON">
+      <svg viewBox="0 0 20 20"><path d="M10 13V3M6 7l4-4 4 4M4 16h12"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-theme" title="Toggle light / dark">
+      <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="6"/><path d="M10 4a6 6 0 0 1 0 12z" class="fill"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-help" title="Help">
+      <svg viewBox="0 0 20 20"><path d="M7.5 7.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5v.7"/><circle cx="10" cy="15" r=".6" class="fill"/></svg>
+    </button>
+  </div>
+
+  <div class="ui" id="status"></div>
+  <div class="ui panel" id="zoom">
+    <button id="zoom-out" title="Zoom out">−</button>
+    <button id="zoom-reset" title="Reset zoom">100%</button>
+    <button id="zoom-in" title="Zoom in">+</button>
+  </div>
+  <div class="ui" id="filter-hint" hidden></div>
+  <div class="ui" id="empty-hint" hidden>Double-click anywhere to begin</div>
+
+  <div class="ui panel" id="fmt" hidden>
+    <button data-cmd="bold" title="Bold (Ctrl/⌘ B)"><b>B</b></button>
+    <button data-cmd="italic" title="Italic (Ctrl/⌘ I)"><i>I</i></button>
+    <button data-cmd="underline" title="Underline (Ctrl/⌘ U)"><u>U</u></button>
+  </div>
+
+  <div class="ui panel" id="menu" hidden></div>
+  <div class="ui" id="toast"></div>
+
+  <div class="ui" id="help" hidden>
+    <div class="panel help-card">
+      <button class="icon-btn help-close" title="Close">
+        <svg viewBox="0 0 20 20"><path d="M5 5l10 10M15 5L5 15"/></svg>
+      </button>
+      <h2>relata</h2>
+      <p class="sub">A quiet canvas for the relationships in your world.</p>
+      <dl>
+        <dt>Write</dt><dd>Click a title or text area and type. Select text for <b>bold</b>, <i>italic</i>, <u>underline</u> (or Ctrl/⌘ B · I · U).</dd>
+        <dt>Move</dt><dd>Press and drag a node.</dd>
+        <dt>Relate</dt><dd>Drag from a node's <em>edge</em>. Drop on another node to connect them, or on empty space to create a new connected node.</dd>
+        <dt>Create</dt><dd>Double-click empty space, or right-click for a typed node.</dd>
+        <dt>Focus</dt><dd>Click a type (on a node or up top) to show only that type. Click empty space to show everything.</dd>
+        <dt>Images</dt><dd>Drop or paste an image onto a node, or right-click › Add image.</dd>
+        <dt>Connections</dt><dd>Double-click a line to label it. Click it and press Delete to remove.</dd>
+        <dt>Navigate</dt><dd>Scroll to zoom, drag empty space (or hold Space) to pan. <kbd>F</kbd> fits all, <kbd>0</kbd> centers the first node.</dd>
+        <dt>Undo</dt><dd><kbd>Ctrl/⌘ Z</kbd> · redo <kbd>Ctrl/⌘ Shift Z</kbd>. Right-click a node to change its type or delete it.</dd>
+        <dt>Saving</dt><dd>Everything is saved automatically in this browser. Use Export for backups or to move to another browser.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <input type="file" id="file-import" accept="application/json,.json" hidden>
+  <input type="file" id="file-image" accept="image/*" hidden>
+
+  <template id="node-tpl">
+    <div class="node">
+      <div class="halo"></div>
+      <div class="card">
+        <div class="seg type"><span class="type-label"></span><button class="type-pick" tabindex="-1" title="Change type"><svg viewBox="0 0 20 20"><path d="M6 8l4 4 4-4"/></svg></button></div>
+        <div class="seg title" contenteditable="true" spellcheck="true" data-placeholder="Untitled"></div>
+        <div class="seg body"></div>
+      </div>
+    </div>
+  </template>
+
+  <script src="js/config.js"></script>
+  <script src="js/sanitize.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
